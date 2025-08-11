@@ -5,10 +5,11 @@ red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'; plain='\033[0m'
 
 GITHUB_OWNER="msbCyricTohoku"
 GITHUB_REPO="my-x-ui"
-FALLBACK_TAG="v1.0.0"
+FALLBACK_TAG="v1.0.1"   # bump when you publish a new release
 
 [[ ${EUID:-$(id -u)} -ne 0 ]] && echo -e "${red}Error:${plain} must run as root" && exit 1
 
+# Detect OS family
 if   [[ -f /etc/redhat-release ]]; then release="centos"
 elif grep -Eqi "debian" /etc/issue 2>/dev/null; then release="debian"
 elif grep -Eqi "ubuntu" /etc/issue 2>/dev/null; then release="ubuntu"
@@ -18,6 +19,7 @@ elif grep -Eqi "ubuntu" /proc/version 2>/dev/null; then release="ubuntu"
 elif grep -Eqi "centos|red hat|redhat" /proc/version 2>/dev/null; then release="centos"
 else echo -e "${red}System version not detected${plain}"; exit 1; fi
 
+# Detect arch
 arch=$(arch)
 case "$arch" in
   x86_64|x64|amd64) arch="amd64" ;;
@@ -27,16 +29,17 @@ case "$arch" in
 esac
 echo "Architecture: ${arch}"
 
+# 32-bit guard
 if [ "$(getconf WORD_BIT)" != '32' ] && [ "$(getconf LONG_BIT)" != '64' ]; then
   echo "32-bit not supported"; exit 1; fi
 
 install_base() {
   if [[ x"${release}" == x"centos" ]]; then
     yum install -y wget curl tar unzip ca-certificates || true
-    update-ca-trust || true
+    command -v update-ca-trust >/dev/null 2>&1 && update-ca-trust || true
   else
     apt update -y && apt install -y wget curl tar unzip ca-certificates
-    update-ca-certificates || true
+    command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates || true
   fi
 }
 
@@ -65,6 +68,7 @@ resolve_version() {
   echo "$tag"
 }
 
+# Ensure /usr/local/x-ui/bin has a working core at "xray"
 ensure_xray_core() {
   local bindir="/usr/local/x-ui/bin"
   mkdir -p "$bindir"
@@ -73,13 +77,12 @@ ensure_xray_core() {
   local core_path_linux="${bindir}/${core_file_linux}"
   local stable_path="${bindir}/xray"
 
-  # If tar contained the arch specific core, make it exec
-  if [[ -f "${core_path_linux}" ]]; then
-    chmod +x "${core_path_linux}" || true
-  fi
+  # If files exist, make them executable
+  [[ -e "${core_path_linux}" ]] && chmod +x "${core_path_linux}" || true
+  [[ -e "${stable_path}"     ]] && chmod +x "${stable_path}"     || true
 
-  # If neither stable nor arch file exists, fetch from XTLS
-  if [[ ! -x "${stable_path}" && ! -x "${core_path_linux}" ]]; then
+  # If neither exists, fetch from XTLS
+  if [[ ! -e "${stable_path}" && ! -e "${core_path_linux}" ]]; then
     echo "Xray core not found in release; downloading core…"
     local zip url
     case "$arch" in
@@ -93,16 +96,19 @@ ensure_xray_core() {
     unzip -j "${bindir}/xray.zip" xray -d "${bindir}"
     rm -f "${bindir}/xray.zip"
     chmod +x "${stable_path}"
+    # keep a compat filename for references to -linux-${arch}
     ln -sf "xray" "${core_path_linux}"
   fi
 
-  # Ensure stable name exists and points to the arch file when present
-  if [[ -x "${core_path_linux}" ]]; then
+  # Always ensure stable name points to the arch file if present
+  if [[ -e "${core_path_linux}" ]]; then
     ln -sf "${core_file_linux}" "${stable_path}"
   fi
 
+  # Final sanity check
   if [[ ! -x "${stable_path}" ]]; then
     echo -e "${red}Failed to prepare Xray core at ${stable_path}${plain}"
+    ls -l "${bindir}" || true
     exit 1
   fi
 }
@@ -124,7 +130,7 @@ install_x_ui() {
   tar zxvf /usr/local/x-ui-linux-${arch}.tar.gz -C /usr/local/x-ui-tmp
   rm -f /usr/local/x-ui-linux-${arch}.tar.gz
 
-  # Allow either "x-ui/..." or flat files in the tarball
+  # Move into /usr/local/x-ui regardless of whether tar had a top folder
   if [[ -d /usr/local/x-ui-tmp/x-ui ]]; then
     mv /usr/local/x-ui-tmp/x-ui /usr/local/x-ui
   else
@@ -135,6 +141,19 @@ install_x_ui() {
   fi
   rm -rf /usr/local/x-ui-tmp
   cd /usr/local/x-ui
+
+  # --- Normalize layout if tar had a single top-level dir (e.g., x-ui-amd64/) ---
+  if [[ ! -d /usr/local/x-ui/bin ]]; then
+    mapfile -t topdirs < <(find /usr/local/x-ui -mindepth 1 -maxdepth 1 -type d)
+    if [[ ${#topdirs[@]} -eq 1 ]]; then
+      subdir="${topdirs[0]}"
+      echo "Normalizing layout: flattening $(basename "$subdir") into /usr/local/x-ui"
+      shopt -s dotglob nullglob
+      mv "${subdir}"/* /usr/local/x-ui/ || true
+      rmdir "${subdir}" || true
+      shopt -u dotglob nullglob
+    fi
+  fi
 
   # Permissions
   [[ -f x-ui ]] && chmod +x x-ui
