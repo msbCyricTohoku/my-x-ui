@@ -110,12 +110,10 @@ config_after_install() {
 
 install_x_ui() {
     systemctl stop x-ui 2>/dev/null
-
     cd /usr/local/ || exit 1
 
-    # Figure out which version to download
-    if [[ $# -eq 0 ]]; then
-        # Get latest tag from YOUR repo
+    # If no arg OR arg is empty -> use latest from your releases
+    if [[ $# -eq 0 || -z "${1:-}" ]]; then
         api_url="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest"
         last_version=$(curl -Ls "${api_url}" | grep -m1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ -z "$last_version" ]]; then
@@ -124,14 +122,13 @@ install_x_ui() {
             last_version="${FALLBACK_TAG}"
         fi
         echo -e "Detected latest ${GITHUB_OWNER}/${GITHUB_REPO} version: ${green}${last_version}${plain}, starting installation"
-        asset_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
     else
         last_version="$1"
         echo -e "Starting installation of ${GITHUB_REPO} ${green}${last_version}${plain}"
-        asset_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
     fi
 
-    # Download your fork's tarball
+    asset_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
+
     wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz "${asset_url}"
     if [[ $? -ne 0 ]]; then
         echo -e "${red}Failed to download ${GITHUB_REPO} ${last_version} for arch ${arch}.${plain}"
@@ -161,7 +158,7 @@ install_x_ui() {
     wget --no-check-certificate -O /usr/bin/x-ui "https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/x-ui.sh"
     chmod +x /usr/bin/x-ui
 
-    # Some packages also include /usr/local/x-ui/x-ui.sh; make sure it's executable if present
+    # If bundled, ensure it's executable
     if [[ -f /usr/local/x-ui/x-ui.sh ]]; then
         chmod +x /usr/local/x-ui/x-ui.sh
     fi
@@ -194,5 +191,6 @@ install_x_ui() {
 
 echo -e "${green}Start installation${plain}"
 install_base
-install_x_ui "$1"
+# pass through any provided args properly (none if none)
+install_x_ui "$@"
 
