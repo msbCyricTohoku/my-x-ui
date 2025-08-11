@@ -5,32 +5,41 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
+# ====== customize these if you ever move repos ======
+GITHUB_OWNER="msbCyricTohoku"
+GITHUB_REPO="my-x-ui"
+FALLBACK_TAG="v1.0.0"   # used only if GitHub API "latest" check fails
+# ====================================================
+
 cur_dir=$(pwd)
 
 # check root
-[[ $EUID -ne 0 ]] && echo -e "${red}Error:${plain} must run this script as root!\n" && exit 1
+if [[ $EUID -ne 0 ]]; then
+  echo -e "${red}Error:${plain} must run this script as root!\n"
+  exit 1
+fi
 
 # check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
-elif cat /etc/issue | grep -Eqi "debian"; then
+elif grep -Eqi "debian" /etc/issue 2>/dev/null; then
     release="debian"
-elif cat /etc/issue | grep -Eqi "ubuntu"; then
+elif grep -Eqi "ubuntu" /etc/issue 2>/dev/null; then
     release="ubuntu"
-elif cat /etc/issue | grep -Eqi "centos|red hat|redhat"; then
+elif grep -Eqi "centos|red hat|redhat" /etc/issue 2>/dev/null; then
     release="centos"
-elif cat /proc/version | grep -Eqi "debian"; then
+elif grep -Eqi "debian" /proc/version 2>/dev/null; then
     release="debian"
-elif cat /proc/version | grep -Eqi "ubuntu"; then
+elif grep -Eqi "ubuntu" /proc/version 2>/dev/null; then
     release="ubuntu"
-elif cat /proc/version | grep -Eqi "centos|red hat|redhat"; then
+elif grep -Eqi "centos|red hat|redhat" /proc/version 2>/dev/null; then
     release="centos"
 else
-    echo -e "${red}System version not detected, please contact script author!${plain}\n" && exit 1
+    echo -e "${red}System version not detected, please contact script author!${plain}\n"
+    exit 1
 fi
 
 arch=$(arch)
-
 if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
     arch="amd64"
 elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
@@ -41,17 +50,14 @@ else
     arch="amd64"
     echo -e "${red}Failed to detect architecture, using default: ${arch}${plain}"
 fi
-
 echo "Architecture: ${arch}"
 
-if [ $(getconf WORD_BIT) != '32' ] && [ $(getconf LONG_BIT) != '64' ]; then
+if [ "$(getconf WORD_BIT)" != '32' ] && [ "$(getconf LONG_BIT)" != '64' ]; then
     echo "This software does not support 32-bit systems (x86); please use a 64-bit system (x86_64). If this detection is wrong, contact the author"
-    exit -1
+    exit 1
 fi
 
 os_version=""
-
-# os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
 fi
@@ -75,83 +81,99 @@ fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install wget curl tar -y
+        yum install -y wget curl tar
     else
-        apt install wget curl tar -y
+        apt update -y && apt install -y wget curl tar
     fi
 }
 
-#This function will be called when user installed x-ui out of sercurity
+#This function will be called when user installed x-ui out of security
 config_after_install() {
     echo -e "${yellow}For security, change the port and account password after installation/update${plain}"
-    read -p "Continue? [y/n]": config_confirm
+    read -p "Continue? [y/n]: " config_confirm
     if [[ x"${config_confirm}" == x"y" || x"${config_confirm}" == x"Y" ]]; then
-        read -p "Please set your account name:" config_account
-        echo -e "${yellow}Your account name will be set to:${config_account}${plain}"
-        read -p "Please set your account password:" config_password
-        echo -e "${yellow}Your account password will be set to:${config_password}${plain}"
-        read -p "Please set the panel access port:" config_port
-        echo -e "${yellow}Your panel access port will be set to:${config_port}${plain}"
+        read -p "Please set your account name: " config_account
+        echo -e "${yellow}Your account name will be set to: ${config_account}${plain}"
+        read -p "Please set your account password: " config_password
+        echo -e "${yellow}Your account password will be set to: ${config_password}${plain}"
+        read -p "Please set the panel access port: " config_port
+        echo -e "${yellow}Your panel access port will be set to: ${config_port}${plain}"
         echo -e "${yellow}Confirming settings${plain}"
-        /usr/local/x-ui/x-ui setting -username ${config_account} -password ${config_password}
+        /usr/local/x-ui/x-ui setting -username "${config_account}" -password "${config_password}"
         echo -e "${yellow}Account and password set${plain}"
-        /usr/local/x-ui/x-ui setting -port ${config_port}
+        /usr/local/x-ui/x-ui setting -port "${config_port}"
         echo -e "${yellow}Panel port set${plain}"
     else
         echo -e "${red}Cancelled, all settings remain default, please modify promptly${plain}"
     fi
 }
 
-install_x-ui() {
-    systemctl stop x-ui
-    cd /usr/local/
+install_x_ui() {
+    systemctl stop x-ui 2>/dev/null
 
-    if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/vaxilu/x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}Failed to check x-ui version, possibly exceeded Github API limit. Please try later or specify x-ui version manually${plain}"
-            exit 1
+    cd /usr/local/ || exit 1
+
+    # Figure out which version to download
+    if [[ $# -eq 0 ]]; then
+        # Get latest tag from YOUR repo
+        api_url="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest"
+        last_version=$(curl -Ls "${api_url}" | grep -m1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [[ -z "$last_version" ]]; then
+            echo -e "${yellow}Warning:${plain} Failed to check latest release from your repo (rate limit or network?)."
+            echo -e "Falling back to ${green}${FALLBACK_TAG}${plain}"
+            last_version="${FALLBACK_TAG}"
         fi
-        echo -e "Detected latest x-ui version: ${last_version}, starting installation"
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Failed to download x-ui. Please ensure your server can download files from Github${plain}"
-            exit 1
-        fi
+        echo -e "Detected latest ${GITHUB_OWNER}/${GITHUB_REPO} version: ${green}${last_version}${plain}, starting installation"
+        asset_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
     else
-        last_version=$1
-        url="https://github.com/vaxilu/x-ui/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
-        echo -e "Starting installation of x-ui v$1"
-        wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz ${url}
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}Failed to download x-ui v$1, please ensure this version exists${plain}"
-            exit 1
-        fi
+        last_version="$1"
+        echo -e "Starting installation of ${GITHUB_REPO} ${green}${last_version}${plain}"
+        asset_url="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${last_version}/x-ui-linux-${arch}.tar.gz"
     fi
 
+    # Download your fork's tarball
+    wget -N --no-check-certificate -O /usr/local/x-ui-linux-${arch}.tar.gz "${asset_url}"
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}Failed to download ${GITHUB_REPO} ${last_version} for arch ${arch}.${plain}"
+        echo -e "URL tried: ${asset_url}"
+        exit 1
+    fi
+
+    # Clean old dir, unpack
     if [[ -e /usr/local/x-ui/ ]]; then
-        rm /usr/local/x-ui/ -rf
+        rm -rf /usr/local/x-ui/
     fi
 
     tar zxvf x-ui-linux-${arch}.tar.gz
-    rm x-ui-linux-${arch}.tar.gz -f
-    cd x-ui
-    chmod +x x-ui bin/xray-linux-${arch}
+    rm -f x-ui-linux-${arch}.tar.gz
+    cd x-ui || { echo -e "${red}Unpack failed (x-ui dir missing)${plain}"; exit 1; }
+
+    # Ensure binaries/scripts are executable
+    chmod +x x-ui || true
+    if [[ -f "bin/xray-linux-${arch}" ]]; then
+        chmod +x "bin/xray-linux-${arch}"
+    fi
+
+    # Install service
     cp -f x-ui.service /etc/systemd/system/
-    wget --no-check-certificate -O /usr/bin/x-ui https://raw.githubusercontent.com/vaxilu/x-ui/main/x-ui.sh
-    chmod +x /usr/local/x-ui/x-ui.sh
+
+    # Pull the helper script from YOUR fork
+    wget --no-check-certificate -O /usr/bin/x-ui "https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/x-ui.sh"
     chmod +x /usr/bin/x-ui
+
+    # Some packages also include /usr/local/x-ui/x-ui.sh; make sure it's executable if present
+    if [[ -f /usr/local/x-ui/x-ui.sh ]]; then
+        chmod +x /usr/local/x-ui/x-ui.sh
+    fi
+
+    # Post-install security prompts
     config_after_install
-    #echo -e "If this is a fresh install, the default web port is ${green}54321${plain}, username and password are ${green}admin${plain}"
-    #echo -e "Ensure this port is not used by other programs and that port 54321 is open${plain}"
-    #    echo -e "If you want to change 54321 to another port, use the x-ui command to modify it and make sure the new port is open"
-    #echo -e ""
-    #echo -e "If updating the panel, access it the way you did before"
-    #echo -e ""
+
     systemctl daemon-reload
     systemctl enable x-ui
     systemctl start x-ui
-    echo -e "${green}x-ui v${last_version}${plain} installation complete, panel started"
+
+    echo -e "${green}${GITHUB_REPO} ${last_version}${plain} installation complete, panel started"
     echo -e ""
     echo -e "x-ui management script usage:"
     echo -e "----------------------------------------------"
@@ -172,4 +194,5 @@ install_x-ui() {
 
 echo -e "${green}Start installation${plain}"
 install_base
-install_x-ui $1
+install_x_ui "$1"
+
