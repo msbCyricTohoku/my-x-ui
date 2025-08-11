@@ -32,9 +32,11 @@ if [ "$(getconf WORD_BIT)" != '32' ] && [ "$(getconf LONG_BIT)" != '64' ]; then
 
 install_base() {
   if [[ x"${release}" == x"centos" ]]; then
-    yum install -y wget curl tar
+    yum install -y wget curl tar unzip ca-certificates || true
+    update-ca-trust || true
   else
-    apt update -y && apt install -y wget curl tar
+    apt update -y && apt install -y wget curl tar unzip ca-certificates
+    update-ca-certificates || true
   fi
 }
 
@@ -63,6 +65,48 @@ resolve_version() {
   echo "$tag"
 }
 
+ensure_xray_core() {
+  local bindir="/usr/local/x-ui/bin"
+  mkdir -p "$bindir"
+
+  local core_file_linux="xray-linux-${arch}"
+  local core_path_linux="${bindir}/${core_file_linux}"
+  local stable_path="${bindir}/xray"
+
+  # If tar contained the arch specific core, make it exec
+  if [[ -f "${core_path_linux}" ]]; then
+    chmod +x "${core_path_linux}" || true
+  fi
+
+  # If neither stable nor arch file exists, fetch from XTLS
+  if [[ ! -x "${stable_path}" && ! -x "${core_path_linux}" ]]; then
+    echo "Xray core not found in release; downloading core…"
+    local zip url
+    case "$arch" in
+      amd64) zip="Xray-linux-64.zip" ;;
+      arm64) zip="Xray-linux-arm64-v8a.zip" ;;
+      s390x) zip="Xray-linux-s390x.zip" ;;
+      *)     zip="Xray-linux-64.zip" ;;
+    esac
+    url="https://github.com/XTLS/Xray-core/releases/latest/download/${zip}"
+    curl -L -o "${bindir}/xray.zip" "$url"
+    unzip -j "${bindir}/xray.zip" xray -d "${bindir}"
+    rm -f "${bindir}/xray.zip"
+    chmod +x "${stable_path}"
+    ln -sf "xray" "${core_path_linux}"
+  fi
+
+  # Ensure stable name exists and points to the arch file when present
+  if [[ -x "${core_path_linux}" ]]; then
+    ln -sf "${core_file_linux}" "${stable_path}"
+  fi
+
+  if [[ ! -x "${stable_path}" ]]; then
+    echo -e "${red}Failed to prepare Xray core at ${stable_path}${plain}"
+    exit 1
+  fi
+}
+
 install_x_ui() {
   systemctl stop x-ui 2>/dev/null || true
   cd /usr/local/
@@ -80,6 +124,7 @@ install_x_ui() {
   tar zxvf /usr/local/x-ui-linux-${arch}.tar.gz -C /usr/local/x-ui-tmp
   rm -f /usr/local/x-ui-linux-${arch}.tar.gz
 
+  # Allow either "x-ui/..." or flat files in the tarball
   if [[ -d /usr/local/x-ui-tmp/x-ui ]]; then
     mv /usr/local/x-ui-tmp/x-ui /usr/local/x-ui
   else
@@ -91,19 +136,22 @@ install_x_ui() {
   rm -rf /usr/local/x-ui-tmp
   cd /usr/local/x-ui
 
+  # Permissions
   [[ -f x-ui ]] && chmod +x x-ui
   [[ -f "bin/xray-linux-${arch}" ]] && chmod +x "bin/xray-linux-${arch}"
   [[ -f x-ui.sh ]] && chmod +x x-ui.sh
 
+  # Service & CLI
   [[ -f x-ui.service ]] && cp -f x-ui.service /etc/systemd/system/
-
   if [[ -f /usr/local/x-ui/x-ui.sh ]]; then
-    cp -f /usr/local/x-ui/x-ui.sh /usr/bin/x-ui
-    chmod +x /usr/bin/x-ui
+    cp -f /usr/local/x-ui/x-ui.sh /usr/bin/x-ui && chmod +x /usr/bin/x-ui
   else
     wget --no-check-certificate -O /usr/bin/x-ui "https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/x-ui.sh"
     chmod +x /usr/bin/x-ui
   fi
+
+  # Ensure the core exists at a stable path
+  ensure_xray_core
 
   config_after_install
 
