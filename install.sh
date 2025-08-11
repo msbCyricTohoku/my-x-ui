@@ -68,6 +68,35 @@ resolve_version() {
   echo "$tag"
 }
 
+# Flatten any single top-level folder (e.g., x-ui-amd64/) into /usr/local/x-ui
+flatten_layout() {
+  local root="/usr/local/x-ui"
+  if [[ -d "$root/bin" ]]; then return 0; fi
+
+  # Common names
+  for d in "$root/x-ui-amd64" "$root/x-ui-arm64"; do
+    if [[ -d "$d" ]]; then
+      echo "Normalizing layout: flattening $(basename "$d") into $root"
+      shopt -s dotglob nullglob
+      mv "$d"/* "$root"/
+      rmdir "$d" || true
+      shopt -u dotglob nullglob
+      return 0
+    fi
+  done
+
+  # Generic: if there is exactly one subdir, flatten it
+  mapfile -t topdirs < <(find "$root" -mindepth 1 -maxdepth 1 -type d)
+  if [[ ${#topdirs[@]} -eq 1 ]]; then
+    local d="${topdirs[0]}"
+    echo "Normalizing layout: flattening $(basename "$d") into $root"
+    shopt -s dotglob nullglob
+    mv "$d"/* "$root"/ || true
+    rmdir "$d" || true
+    shopt -u dotglob nullglob
+  fi
+}
+
 # Ensure /usr/local/x-ui/bin has a working core at "xray"
 ensure_xray_core() {
   local bindir="/usr/local/x-ui/bin"
@@ -77,11 +106,21 @@ ensure_xray_core() {
   local core_path_linux="${bindir}/${core_file_linux}"
   local stable_path="${bindir}/xray"
 
+  # If stable is a dangling symlink (points to nowhere), remove it so we can recreate
+  if [[ -L "${stable_path}" && ! -e "${stable_path}" ]]; then
+    rm -f "${stable_path}"
+  fi
+
+  # If arch-specific symlink or file is dangling/missing but stable exists as symlink to it, fix later
+  if [[ -L "${core_path_linux}" && ! -e "${core_path_linux}" ]]; then
+    rm -f "${core_path_linux}"
+  fi
+
   # If files exist, make them executable
   [[ -e "${core_path_linux}" ]] && chmod +x "${core_path_linux}" || true
   [[ -e "${stable_path}"     ]] && chmod +x "${stable_path}"     || true
 
-  # If neither exists, fetch from XTLS
+  # If neither exists, fetch from XTLS (writes a real file at bin/xray)
   if [[ ! -e "${stable_path}" && ! -e "${core_path_linux}" ]]; then
     echo "Xray core not found in release; downloading core…"
     local zip url
@@ -96,11 +135,12 @@ ensure_xray_core() {
     unzip -j "${bindir}/xray.zip" xray -d "${bindir}"
     rm -f "${bindir}/xray.zip"
     chmod +x "${stable_path}"
-    # keep a compat filename for references to -linux-${arch}
-    ln -sf "xray" "${core_path_linux}"
   fi
 
-  # Always ensure stable name points to the arch file if present
+  # Maintain both names for compatibility
+  if [[ -e "${stable_path}" && ! -e "${core_path_linux}" ]]; then
+    ln -sf "xray" "${core_path_linux}"
+  fi
   if [[ -e "${core_path_linux}" ]]; then
     ln -sf "${core_file_linux}" "${stable_path}"
   fi
@@ -130,7 +170,7 @@ install_x_ui() {
   tar zxvf /usr/local/x-ui-linux-${arch}.tar.gz -C /usr/local/x-ui-tmp
   rm -f /usr/local/x-ui-linux-${arch}.tar.gz
 
-  # Move into /usr/local/x-ui regardless of whether tar had a top folder
+  # Move into /usr/local/x-ui whether tar had a top folder or not
   if [[ -d /usr/local/x-ui-tmp/x-ui ]]; then
     mv /usr/local/x-ui-tmp/x-ui /usr/local/x-ui
   else
@@ -142,18 +182,8 @@ install_x_ui() {
   rm -rf /usr/local/x-ui-tmp
   cd /usr/local/x-ui
 
-  # --- Normalize layout if tar had a single top-level dir (e.g., x-ui-amd64/) ---
-  if [[ ! -d /usr/local/x-ui/bin ]]; then
-    mapfile -t topdirs < <(find /usr/local/x-ui -mindepth 1 -maxdepth 1 -type d)
-    if [[ ${#topdirs[@]} -eq 1 ]]; then
-      subdir="${topdirs[0]}"
-      echo "Normalizing layout: flattening $(basename "$subdir") into /usr/local/x-ui"
-      shopt -s dotglob nullglob
-      mv "${subdir}"/* /usr/local/x-ui/ || true
-      rmdir "${subdir}" || true
-      shopt -u dotglob nullglob
-    fi
-  fi
+  # Normalize: flatten x-ui-amd64/arm64 or any single subdir into /usr/local/x-ui
+  flatten_layout
 
   # Permissions
   [[ -f x-ui ]] && chmod +x x-ui
